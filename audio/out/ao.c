@@ -52,6 +52,7 @@ extern const struct ao_driver audio_out_null;
 extern const struct ao_driver audio_out_alsa;
 extern const struct ao_driver audio_out_wasapi;
 extern const struct ao_driver audio_out_asio;
+extern const struct ao_driver audio_out_wasapi_spatial;
 extern const struct ao_driver audio_out_pcm;
 extern const struct ao_driver audio_out_lavc;
 extern const struct ao_driver audio_out_sdl;
@@ -109,6 +110,9 @@ static const struct ao_driver * const audio_out_drivers[] = {
     &audio_out_sndio,
 #endif
     &audio_out_null,
+#if HAVE_WASAPI_SPATIAL
+    &audio_out_wasapi_spatial,
+#endif
 #if HAVE_COREAUDIO
     &audio_out_coreaudio_exclusive,
 #endif
