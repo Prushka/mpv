@@ -47,6 +47,9 @@ struct spatial_object {
 struct priv {
     mp_thread thread;
     HANDLE init_done;
+    // Set once the render thread has carried out a reset: mpv feeds the
+    // stream again as soon as reset() returns.
+    HANDLE reset_done;
     HANDLE command_event;
     HANDLE render_event;
     atomic_bool shutdown;
@@ -128,6 +131,27 @@ static bool stop_stream(struct ao *ao)
     return true;
 }
 
+static bool activate_objects(struct ao *ao)
+{
+    struct priv *p = ao->priv;
+
+    for (int n = 0; n < p->num_objects; n++) {
+        if (p->objects[n].object)
+            continue;
+        HRESULT hr = ISpatialAudioObjectRenderStream_ActivateSpatialAudioObject(
+            p->stream, p->objects[n].type, &p->objects[n].object);
+        if (FAILED(hr) || !p->objects[n].object) {
+            MP_ERR(ao, "Activating spatial object %d failed: %s\n",
+                   n, mp_HRESULT_to_str(hr));
+            return false;
+        }
+    }
+    return true;
+}
+
+// Reset revokes every object of the stream. The whole static bed is built
+// again here, before mpv feeds the stream anew, so that a seek never meets a
+// stream without its objects.
 static bool reset_stream(struct ao *ao)
 {
     struct priv *p = ao->priv;
@@ -143,7 +167,7 @@ static bool reset_stream(struct ao *ao)
                mp_HRESULT_to_str(hr));
         return false;
     }
-    return true;
+    return activate_objects(ao);
 }
 
 static bool start_stream(struct ao *ao)
@@ -471,9 +495,12 @@ static bool process_requests(struct ao *ao)
     if (atomic_load(&p->shutdown))
         return false;
 
-    if (atomic_exchange(&p->reset_requested, false) &&
-        !reset_stream(ao))
-        return false;
+    if (atomic_exchange(&p->reset_requested, false)) {
+        bool ok = reset_stream(ao);
+        SetEvent(p->reset_done);
+        if (!ok)
+            return false;
+    }
 
     bool should_run = atomic_load(&p->running_requested);
     if (should_run && !p->started)
@@ -553,6 +580,10 @@ static void uninit(struct ao *ao)
         CloseHandle(p->init_done);
         p->init_done = NULL;
     }
+    if (p->reset_done) {
+        CloseHandle(p->reset_done);
+        p->reset_done = NULL;
+    }
     if (p->command_event) {
         CloseHandle(p->command_event);
         p->command_event = NULL;
@@ -574,9 +605,11 @@ static int init(struct ao *ao)
     }
 
     p->init_done = CreateEventW(NULL, false, false, NULL);
+    p->reset_done = CreateEventW(NULL, false, false, NULL);
     p->command_event = CreateEventW(NULL, false, false, NULL);
     p->render_event = CreateEventW(NULL, false, false, NULL);
-    if (!p->init_done || !p->command_event || !p->render_event) {
+    if (!p->init_done || !p->reset_done || !p->command_event ||
+        !p->render_event) {
         MP_ERR(ao, "Creating spatial audio events failed.\n");
         uninit(ao);
         return -1;
@@ -601,12 +634,18 @@ static int init(struct ao *ao)
     return 0;
 }
 
+// Returns once the render thread has stopped, reset and rebuilt the stream,
+// or has failed to and asked for a reload. A thread that has ended answers
+// nothing, so the wait is bounded.
 static void reset(struct ao *ao)
 {
     struct priv *p = ao->priv;
     atomic_store(&p->running_requested, false);
+    ResetEvent(p->reset_done);
     atomic_store(&p->reset_requested, true);
     signal_requests(ao);
+    if (WaitForSingleObject(p->reset_done, 2000) != WAIT_OBJECT_0)
+        MP_WARN(ao, "The spatial audio stream did not reset in time.\n");
 }
 
 static void start(struct ao *ao)
