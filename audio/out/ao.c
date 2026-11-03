@@ -296,6 +296,18 @@ static void split_ao_device(void *tmp, char *opt, char **out_ao, char **out_dev)
     *out_ao = bstrto0(tmp, b_ao);
 }
 
+// wasapi-spatial opens the endpoints wasapi lists, by the same ids: a device
+// chosen for one is the other's, so that falling back from one to the other
+// never moves the sound to another output.
+static bool ao_takes_device(const char *driver, const char *pref)
+{
+    if (strcmp(driver, pref) == 0)
+        return true;
+    bool driver_wasapi = !strcmp(driver, "wasapi") || !strcmp(driver, "wasapi-spatial");
+    bool pref_wasapi = !strcmp(pref, "wasapi") || !strcmp(pref, "wasapi-spatial");
+    return driver_wasapi && pref_wasapi;
+}
+
 struct ao *ao_init_best(struct mpv_global *global,
                         int init_flags,
                         void (*wakeup_cb)(void *ctx), void *wakeup_ctx,
@@ -350,7 +362,7 @@ struct ao *ao_init_best(struct mpv_global *global,
         bool probing = n + 1 != ao_num;
         mp_verbose(log, "Trying audio driver '%s'\n", entry->name);
         char *dev = NULL;
-        if (pref_ao && pref_dev && strcmp(entry->name, pref_ao) == 0) {
+        if (pref_ao && pref_dev && ao_takes_device(entry->name, pref_ao)) {
             dev = pref_dev;
             mp_verbose(log, "Using preferred device '%s'\n", dev);
         }
