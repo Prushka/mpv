@@ -81,6 +81,7 @@ struct priv {
     int num_dynamic;
     bool dynamic_activated;     // activated since the stream started or reset
     float *scratch;             // the samples of a slot Windows gave no object
+    int64_t traced_ns;          // when the positions were last logged (debug)
 };
 
 static AudioObjectType speaker_to_object(int speaker)
@@ -514,6 +515,11 @@ static void place_dynamic(struct ao *ao)
 {
     struct priv *p = ao->priv;
     double pts = ao_get_read_pts(ao);
+    // At debug level, twice a second: where each sounding object was put.
+    int64_t now = mp_time_ns();
+    bool trace = now - p->traced_ns >= MP_TIME_MS_TO_NS(500);
+    if (trace)
+        p->traced_ns = now;
     for (int n = p->num_static; n < p->num_objects; n++) {
         ISpatialAudioObject *object = p->objects[n].object;
         if (!object)
@@ -527,6 +533,11 @@ static void place_dynamic(struct ao *ao)
             ISpatialAudioObject_SetPosition(object, position[0], position[1],
                                             position[2]);
             ISpatialAudioObject_SetVolume(object, 1.0f);
+            if (trace) {
+                MP_DBG(ao, "moving object %d at %.3f s: (%.2f, %.2f, %.2f)\n",
+                       n - p->num_static, pts, position[0], position[1],
+                       position[2]);
+            }
         } else {
             ISpatialAudioObject_SetVolume(object, 0.0f);
         }
