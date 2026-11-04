@@ -93,6 +93,10 @@ test('gl-video', gl_video)
 json = executable('json', 'json.c', include_directories: [incdir, incdir_public], link_with: test_utils)
 test('json', json)
 
+moving_objects = executable('moving-objects', files('moving_objects.c', '../audio/moving_objects.c'),
+                            include_directories: incdir)
+test('moving-objects', moving_objects)
+
 linked_list = executable('linked-list', files('linked_list.c'), include_directories: incdir)
 test('linked-list', linked_list)
 

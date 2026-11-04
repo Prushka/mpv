@@ -55,6 +55,7 @@ struct buffer_state {
     struct mp_filter *filter_root;
     struct mp_filter *input;    // connected to queue
     struct mp_aframe *pending;  // last, not fully consumed output
+    double read_pts;            // title time of the first sample the last read returned
 
     bool streaming;             // AO streaming active
     bool playing;               // logically playing audio from buffer
@@ -122,6 +123,8 @@ static int read_buffer(struct ao *ao, void **data, int samples, bool *eof,
     struct buffer_state *p = ao->buffer_state;
     int pos = 0;
     *eof = false;
+    if (data)
+        p->read_pts = MP_NOPTS_VALUE;
 
     while (p->playing && !p->paused && pos < samples) {
         if (!p->pending || !mp_aframe_get_size(p->pending)) {
@@ -141,6 +144,9 @@ static int read_buffer(struct ao *ao, void **data, int samples, bool *eof,
         if (!data)
             break;
 
+        // The frame's time moves on with every sample taken from it.
+        if (pos == 0)
+            p->read_pts = mp_aframe_get_pts(p->pending);
         int copy = mp_aframe_get_size(p->pending);
         uint8_t **fdata = mp_aframe_get_data_ro(p->pending);
         copy = MPMIN(copy, samples - pos);
@@ -225,6 +231,18 @@ int ao_read_data(struct ao *ao, void **data, int samples, int64_t out_time_ns, b
     mp_mutex_unlock(&p->lock);
 
     return pos;
+}
+
+// The title time of the first sample the last ao_read_data() returned, as its
+// frame carries it after every filter; MP_NOPTS_VALUE when it returned silence.
+// For an AO that places what it plays by the title's time (moving objects).
+double ao_get_read_pts(struct ao *ao)
+{
+    struct buffer_state *p = ao->buffer_state;
+    mp_mutex_lock(&p->lock);
+    double pts = p->read_pts;
+    mp_mutex_unlock(&p->lock);
+    return pts;
 }
 
 // Same as ao_read_data(), but convert data according to *fmt.
@@ -545,6 +563,7 @@ void ao_uninit(struct ao *ao)
 void init_buffer_pre(struct ao *ao)
 {
     ao->buffer_state = talloc_zero(ao, struct buffer_state);
+    ao->buffer_state->read_pts = MP_NOPTS_VALUE;
 }
 
 bool init_buffer_post(struct ao *ao)

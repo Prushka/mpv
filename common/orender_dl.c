@@ -96,6 +96,11 @@ static int stub_drain(struct OrenderRenderer *r, float *out,
 }
 static int stub_output_packet_pts(const struct OrenderRenderer *r,
                                   int64_t *pts_us) { return 0; }
+static void stub_set_moving_objects(struct OrenderRenderer *r, uint32_t slots) {}
+static uint32_t stub_moving_objects(const struct OrenderRenderer *r) { return 0; }
+static uint32_t stub_moving_positions(const struct OrenderRenderer *r,
+                                      struct OrenderMovingSlot *out,
+                                      uint32_t cap) { return 0; }
 static const char *stub_build_id(void) { return NULL; }
 static void stub_overlay_set_rendering(int rendering) {}
 static void stub_overlay_clear(void) {}
@@ -154,6 +159,9 @@ static const struct orender_dl stubs = {
     .set_option = stub_set_option,
     .drain = stub_drain,
     .output_packet_pts = stub_output_packet_pts,
+    .set_moving_objects = stub_set_moving_objects,
+    .moving_objects = stub_moving_objects,
+    .moving_positions = stub_moving_positions,
     .build_id = stub_build_id,
     .overlay_set_rendering = stub_overlay_set_rendering,
     .overlay_clear = stub_overlay_clear,
@@ -319,6 +327,9 @@ static bool try_load(struct mp_log *log, const char *path, const char *origin)
         OPT_SYM(set_option,            "orender_set_option"),
         OPT_SYM(drain,                 "orender_drain"),
         OPT_SYM(output_packet_pts,     "orender_output_packet_pts"),
+        OPT_SYM(set_moving_objects,    "orender_set_moving_objects"),
+        OPT_SYM(moving_objects,        "orender_moving_objects"),
+        OPT_SYM(moving_positions,      "orender_moving_positions"),
         OPT_SYM(build_id,              "orender_build_id"),
         OPT_SYM(overlay_set_rendering, "orender_overlay_set_rendering"),
         OPT_SYM(overlay_clear,         "orender_overlay_clear"),
@@ -354,6 +365,7 @@ static bool try_load(struct mp_log *log, const char *path, const char *origin)
                      t.overlay_toggle != stub_overlay_toggle;
     t.have_set_option = t.set_option != stub_set_option;
     t.have_output_packet_pts = t.output_packet_pts != stub_output_packet_pts;
+    t.have_moving_objects = t.moving_positions != stub_moving_positions;
     t.path = talloc_strdup(NULL, path);   // process singleton; never freed
 
     table = t;

@@ -31,6 +31,7 @@
 #include "ao_wasapi.h"
 #include "audio/chmap_sel.h"
 #include "audio/format.h"
+#include "audio/moving_objects.h"
 #include "common/common.h"
 #include "common/msg.h"
 #include "internal.h"
@@ -72,6 +73,14 @@ struct priv {
     struct spatial_object objects[MP_NUM_CHANNELS];
     int num_objects;
     uint64_t submitted_frames;
+
+    // Moving objects (audio/moving_objects.h): the decoder's slots follow its
+    // speakers as channels of no position, and play as Windows' dynamic
+    // objects, objects[num_static..num_objects), placed by the title's time.
+    int num_static;
+    int num_dynamic;
+    bool dynamic_activated;     // activated since the stream started or reset
+    float *scratch;             // the samples of a slot Windows gave no object
 };
 
 static AudioObjectType speaker_to_object(int speaker)
@@ -135,7 +144,8 @@ static bool activate_objects(struct ao *ao)
 {
     struct priv *p = ao->priv;
 
-    for (int n = 0; n < p->num_objects; n++) {
+    // The moving objects are activated as the stream is fed (activate_dynamic).
+    for (int n = 0; n < p->num_static; n++) {
         if (p->objects[n].object)
             continue;
         HRESULT hr = ISpatialAudioObjectRenderStream_ActivateSpatialAudioObject(
@@ -161,6 +171,7 @@ static bool reset_stream(struct ao *ao)
 
     HRESULT hr = ISpatialAudioObjectRenderStream_Reset(p->stream);
     release_objects(ao);
+    p->dynamic_activated = false;
     p->submitted_frames = 0;
     if (FAILED(hr)) {
         MP_ERR(ao, "Resetting the spatial audio stream failed: %s\n",
@@ -284,10 +295,49 @@ static bool select_object_format(struct ao *ao)
     return true;
 }
 
+// The decoder's speakers, which Windows has as static objects, followed by
+// `slots` channels of no position: the moving objects, kept as they are.
+static bool select_moving_layout(struct ao *ao, int slots)
+{
+    struct priv *p = ao->priv;
+    const struct mp_chmap *map = &ao->channels;
+    int fixed = map->num - slots;
+    if (fixed <= 0)
+        return false;
+    for (int n = 0; n < map->num; n++) {
+        bool slot = n >= fixed;
+        int speaker = map->speaker[n];
+        if (slot != (speaker == MP_SPEAKER_ID_NA))
+            return false;
+        if (!slot && !mask_has(p->native_mask, speaker_to_object(speaker)))
+            return false;
+    }
+
+    p->static_mask = AudioObjectType_None;
+    p->num_objects = map->num;
+    p->num_static = fixed;
+    p->num_dynamic = slots;
+    for (int n = 0; n < map->num; n++) {
+        if (n < fixed) {
+            p->objects[n].type = speaker_to_object(map->speaker[n]);
+            p->static_mask = (AudioObjectType)((UINT32)p->static_mask |
+                                                (UINT32)p->objects[n].type);
+        } else {
+            p->objects[n].type = AudioObjectType_Dynamic;
+        }
+    }
+    return true;
+}
+
 static bool select_channel_layout(struct ao *ao)
 {
     struct priv *p = ao->priv;
     struct mp_chmap_sel sel = {.tmp = ao};
+
+    p->num_dynamic = 0;
+    int slots = mp_moving_objects_slots();
+    if (slots > 0 && select_moving_layout(ao, slots))
+        return true;
 
     for (int speaker = 0; speaker < MP_SPEAKER_ID_COUNT; speaker++) {
         AudioObjectType type = speaker_to_object(speaker);
@@ -303,6 +353,7 @@ static bool select_channel_layout(struct ao *ao)
 
     p->static_mask = AudioObjectType_None;
     p->num_objects = ao->channels.num;
+    p->num_static = p->num_objects;
     for (int n = 0; n < p->num_objects; n++) {
         AudioObjectType type = speaker_to_object(ao->channels.speaker[n]);
         if (!mask_has(p->native_mask, type)) {
@@ -365,8 +416,9 @@ static bool activate_spatial(struct ao *ao)
     SpatialAudioObjectRenderStreamActivationParams params = {
         .ObjectFormat = p->object_format,
         .StaticObjectTypeMask = p->static_mask,
+        // Whatever Windows can give, up to one per slot: fewer still plays.
         .MinDynamicObjectCount = 0,
-        .MaxDynamicObjectCount = 0,
+        .MaxDynamicObjectCount = p->num_dynamic,
         .Category = AudioCategory_Movie,
         .EventHandle = p->render_event,
         .NotifyObject = NULL,
@@ -396,10 +448,16 @@ static bool activate_spatial(struct ao *ao)
         }
     }
 
+    p->scratch = talloc_zero_array(ao, float, p->max_frames);
+
     MP_INFO(ao, "Using Windows Spatial Audio: %s at %d Hz "
-            "(%d static objects).\n",
+            "(%d static objects, %d moving).\n",
             mp_chmap_to_str(&ao->channels), ao->samplerate,
-            p->num_objects);
+            p->num_static, p->num_dynamic);
+    // Slots asked of a stream that has none (a track without objects): said,
+    // so that whoever asked knows none move.
+    if (p->num_dynamic == 0 && mp_moving_objects_slots() > 0)
+        MP_INFO(ao, "moving objects 0 of 0\n");
     return true;
 }
 
@@ -427,6 +485,54 @@ static int64_t estimate_output_time(struct ao *ao, UINT32 frames)
                                     ao->samplerate);
 }
 
+// Activates the moving objects Windows can give, one per slot, and says how
+// many it gave; a slot without one plays nowhere.
+static void activate_dynamic(struct ao *ao)
+{
+    struct priv *p = ao->priv;
+    int active = 0;
+    for (int n = p->num_static; n < p->num_objects; n++) {
+        if (!p->objects[n].object) {
+            HRESULT hr = ISpatialAudioObjectRenderStream_ActivateSpatialAudioObject(
+                p->stream, AudioObjectType_Dynamic, &p->objects[n].object);
+            if (FAILED(hr) || !p->objects[n].object) {
+                p->objects[n].object = NULL;
+                MP_VERBOSE(ao, "Windows gave no moving object for slot %d: %s\n",
+                           n - p->num_static, mp_HRESULT_to_str(hr));
+                break;
+            }
+        }
+        active++;
+    }
+    p->dynamic_activated = true;
+    MP_INFO(ao, "moving objects %d of %d\n", active, p->num_dynamic);
+}
+
+// Each moving object where its slot is at the title time of the samples just
+// read; a slot without an object, or with no position yet, is silent.
+static void place_dynamic(struct ao *ao)
+{
+    struct priv *p = ao->priv;
+    double pts = ao_get_read_pts(ao);
+    for (int n = p->num_static; n < p->num_objects; n++) {
+        ISpatialAudioObject *object = p->objects[n].object;
+        if (!object)
+            continue;
+        float adm[3], position[3];
+        bool active = false;
+        bool found = pts != MP_NOPTS_VALUE &&
+            mp_moving_objects_lookup(pts, n - p->num_static, adm, &active);
+        if (found && active) {
+            mo_adm_to_windows(adm, position);
+            ISpatialAudioObject_SetPosition(object, position[0], position[1],
+                                            position[2]);
+            ISpatialAudioObject_SetVolume(object, 1.0f);
+        } else {
+            ISpatialAudioObject_SetVolume(object, 0.0f);
+        }
+    }
+}
+
 static bool feed_spatial(struct ao *ao)
 {
     struct priv *p = ao->priv;
@@ -443,7 +549,13 @@ static bool feed_spatial(struct ao *ao)
 
     void *planes[MP_NUM_CHANNELS] = {0};
     bool valid = frames > 0 && frames <= p->max_frames;
+    if (valid && p->num_dynamic > 0 && !p->dynamic_activated)
+        activate_dynamic(ao);
     for (int n = 0; valid && n < p->num_objects; n++) {
+        if (n >= p->num_static && !p->objects[n].object) {
+            planes[n] = p->scratch;
+            continue;
+        }
         if (!p->objects[n].object) {
             hr = ISpatialAudioObjectRenderStream_ActivateSpatialAudioObject(
                 p->stream, p->objects[n].type, &p->objects[n].object);
@@ -472,6 +584,8 @@ static bool feed_spatial(struct ao *ao)
     if (valid) {
         ao_read_data(ao, planes, frames, estimate_output_time(ao, frames),
                      &eof, true, true);
+        if (p->num_dynamic > 0)
+            place_dynamic(ao);
     }
 
     hr = ISpatialAudioObjectRenderStream_EndUpdatingAudioObjects(p->stream);

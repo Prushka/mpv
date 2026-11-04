@@ -52,6 +52,7 @@
 #include "osdep/timer.h"
 
 #include "audio/decode/ad_orender.h"
+#include "audio/moving_objects.h"
 #include "common/orender_abi.h"
 #include "common/orender_dl.h"
 
@@ -86,6 +87,12 @@ const struct m_sub_options ad_orender_conf = {
          * audio chain applies — the default), "spdif" passes the compressed
          * bitstream through to an AV receiver. */
         {"host-decoder", OPT_CHOICE(host_decoder_idx, {"lavc", 0}, {"spdif", 1})},
+        /* Object output: up to this many of a stream's objects leave the
+         * engine unpanned, in channels of no position after the speakers, and
+         * their positions go to the audio output with the title's time
+         * (audio/moving_objects.h). wasapi-spatial plays them as Windows'
+         * moving objects; 0 pans every object as before. */
+        {"moving", OPT_INT(moving), M_RANGE(0, MO_MAX_SLOTS)},
         {0}
     },
     .size = sizeof(struct ad_orender_params),
@@ -172,6 +179,10 @@ struct priv {
      * again after every engine reset. IAMF has no native decoder in mpv: it
      * never goes to host mode. */
     bool iamf;
+    /* Object output: the slots asked of the engine, and how many held an
+     * object at the last frame (-1 before the first), said in the log. */
+    int moving_slots;
+    int last_moving_objects;
     const uint8_t *iamf_config;
     size_t iamf_config_len;
     bool iamf_config_pending;
@@ -559,6 +570,36 @@ static void process_host(struct mp_filter *da, struct priv *p)
         struct mp_frame frame = mp_pin_out_read(da->ppins[0]);
         mp_pin_in_write(child_in, frame);
     }
+}
+
+/* Object output: where each slot's object was over this frame, with the
+ * frame's title time, for the audio output; and how many slots hold one, in
+ * the log when that changes. */
+static void publish_moving(struct mp_filter *da, struct priv *p, double pts,
+                           size_t n_frames)
+{
+    int objects = (int)p->dl->moving_objects(p->renderer);
+    if (objects != p->last_moving_objects) {
+        MP_INFO(da, "moving objects %d\n", objects);
+        p->last_moving_objects = objects;
+    }
+    if (pts == MP_NOPTS_VALUE || p->sample_rate <= 0)
+        return;
+    struct OrenderMovingSlot slots[MO_MAX_SLOTS];
+    uint32_t n = p->dl->moving_positions(p->renderer, slots, MO_MAX_SLOTS);
+    if (n > MO_MAX_SLOTS)
+        return;
+    struct mo_entry e = {
+        .start_pts = pts,
+        .end_pts = pts + (double)n_frames / p->sample_rate,
+        .slots = (int)n,
+    };
+    for (uint32_t i = 0; i < n; i++) {
+        e.active[i] = slots[i].active != 0;
+        memcpy(e.start[i], slots[i].start, sizeof(e.start[i]));
+        memcpy(e.end[i], slots[i].end, sizeof(e.end[i]));
+    }
+    mp_moving_objects_publish(&e);
 }
 
 /* The engine's timeline restarts (orender_reset): nothing mapped still holds. */
@@ -968,6 +1009,8 @@ static void process_spatial(struct mp_filter *da, struct priv *p, bool probe_hos
         goto done;
     }
     memcpy(data[0], samples, n_frames * (size_t)n_ch * sizeof(float));
+    if (p->moving_slots > 0)
+        publish_moving(da, p, pts, n_frames);
 
 done:
     talloc_free(samples);
@@ -1051,6 +1094,8 @@ static void ad_orender_reset(struct mp_filter *da)
         p->dl->reset(p->renderer);
     p->iamf_config_pending = p->iamf;
     heard_map_clear(p);
+    /* Positions from before a seek must not place what comes after it. */
+    mp_moving_objects_reset();
     if (p->native && p->native->f)
         mp_filter_reset(p->native->f);
     clear_probe_packets(p);
@@ -1249,6 +1294,13 @@ static struct mp_decoder *create(struct mp_filter *parent,
      * by Studio over OSC. */
     if (p->renderer && opts->channel_mode_idx > 0)
         p->dl->set_channel_mode(p->renderer, opts->channel_mode_idx - 1);
+
+    /* Object output, before the first packet (ABI minor >= 13). */
+    p->moving_slots = p->renderer && p->dl->have_moving_objects ? opts->moving : 0;
+    p->last_moving_objects = -1;
+    if (p->moving_slots > 0)
+        p->dl->set_moving_objects(p->renderer, p->moving_slots);
+    mp_moving_objects_set_slots(p->moving_slots);
 
     if (p->renderer)
         p->channels = p->dl->channel_count(p->renderer);

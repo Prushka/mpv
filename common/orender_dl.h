@@ -89,6 +89,14 @@ struct orender_dl {
      * thread on, that audio belongs to an older packet than the one just
      * passed in. */
     int (*output_packet_pts)(const struct OrenderRenderer *r, int64_t *pts_us);
+    /* Object output (ABI minor >= 13; the stubs keep every object panned):
+     * up to 16 objects go out unpanned, in channels labelled Object after the
+     * speakers, and moving_positions says where each was at the first and
+     * last frame of the audio the last call returned. */
+    void (*set_moving_objects)(struct OrenderRenderer *r, uint32_t slots);
+    uint32_t (*moving_objects)(const struct OrenderRenderer *r);
+    uint32_t (*moving_positions)(const struct OrenderRenderer *r,
+                                 struct OrenderMovingSlot *out, uint32_t cap);
     const char *(*build_id)(void);
     void (*overlay_set_rendering)(int rendering);
     void (*overlay_clear)(void);
@@ -111,6 +119,7 @@ struct orender_dl {
     bool have_overlay;              // full overlay symbol group present
     bool have_set_option;
     bool have_output_packet_pts;    // the engine carries input timestamps (ABI >= 11)
+    bool have_moving_objects;       // object output (ABI >= 13)
 };
 
 /* Load liborender once per process (thread-safe; both success and failure are

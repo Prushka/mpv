@@ -68,6 +68,8 @@ sources = files(
     'audio/filter/af_scaletempo2.c',
     'audio/filter/af_scaletempo2_internals.c',
     'audio/fmt-conversion.c',
+    'audio/moving_objects.c',
+    'audio/moving_objects_shared.c',
     'audio/format.c',
     'audio/out/ao.c',
     'audio/out/ao_lavc.c',

@@ -32,6 +32,7 @@ struct ad_orender_params {
     char *osc_monitor_target;   // monitoring host (else config/default)
     int channel_mode_idx;       // initial render override: 0=auto 1=host 2=spatial
     int host_decoder_idx;       // host-mode native decoder: 0=lavc 1=spdif
+    int moving;                 // object output: objects sent unpanned, 0-16 slots
 };
 
 extern const struct m_sub_options ad_orender_conf;
